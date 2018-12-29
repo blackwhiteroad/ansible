@@ -1,0 +1,714 @@
+***配置ansible
+内存2G，CPU2G，硬盘16G
+1台管理主机 	ansible:192.168.3.114
+2台web服务器	web1:192.168.3.157，web1:192.168.3.183
+2台dba服务器	db1:192.168.3.159，db1:192.168.3.116
+1台cache服务器cache:192.168.3.126
+
+创建6台虚拟机
+***配置系统文件模板
+]# cd /etc/libvirt/qemu/
+[root@room9pc01 qemu]# vim node1 | 2.xml 
+<domain type='kvm'>
+  <name>node2</name>
+  <memory unit='GB'>2</memory>
+  <currentMemory unit='GB'>2</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc'>hvm</type>
+    <boot dev='hd'/>
+    <bootmenu enable='yes'/>
+    <bios useserial='yes'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough'>
+  </cpu>
+  <clock offset='localtime'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>restart</on_crash>
+  <devices>
+    <emulator>/usr/libexec/qemu-kvm</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/var/lib/libvirt/images/node2.img'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <interface type='bridge'>
+      <source bridge='vbr'/>
+      <model type='virtio'/>
+    </interface>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <serial type='pty'></serial>
+    <console type='pty'>
+      <target type='serial'/>
+    </console>
+    <memballoon model='virtio'></memballoon>
+  </devices>
+</domain>
+***创建一个qcow2的磁盘文件(基于后端盘node.img)
+]# cd /var/lib/libvirt/images
+]# qemu-img create -f qcow2 ansible.img 16G
+xxx]# qemu-img create -b node.img -f qcow2 ansible.img 16G	//不执行
+**关闭防火墙，selinux
+]# systemctl stop firewalld
+]# setenforce 0
+**更改主机名
+hostnamectl set-hostname ansible
+#设置名称
+]# vi /etc/hosts
+192.168.3.114	ansible
+192.168.3.157	web1
+192.168.3.183	web2
+192.168.3.159	db1
+192.168.3.116 	db2
+192.168.3.126	cache
+注释:配置完成后，ping web1即可ping通
+
+**配置yum源
+]# cd /etc/yum.repos.d/
+]# rm -rf *
+]# vi /etc/yum.repos.d/centos_7.repo
+[Centos_repo]
+name=CentOS packet
+baseurl=ftp://192.168.3.254/centos7
+enabled=1
+gpgcheck=0
+[root@c282c0a2a720 yum.repos.d]# yum repolist
+**安装常用包
+yum -y install net-tools bridge-utils vim psmisc iproute
+**安装ansible软件
+]# yum -y install ansible
+注释：软件包更新指令：createrepo --update .
+**查看ansible版本
+]# ansible --version
+**修改ansible配置文件
+]# vim /etc/ansible/ansible.cfg
+14 inventory      = /etc/ansible/hosts	//取消注释，功能:主机分组列表
+ 61 host_key_checking = False	//取消注释，功能：第1次后取消yes输入，ansible不必等待
+
+]# vim /etc/ansible/hosts	//主机分组
+ 45 [web]
+ 46 web[1:2]
+ 47 
+ 48 [mysql]
+ 49 db1
+ 50 db2
+ 51 
+ 52 [other]
+ 53 cache
+#检测mysql组
+[root@ansible ~]# ansible mysql --list-hosts
+  hosts (2):
+    db1
+    db2
+[root@ansible ~]# ansible all --list-hosts
+  hosts (5):
+    web1
+    web2
+    cache
+    db1
+    db2
+
+ping模块
+sysctl -a | grep icmp
+#禁用ping模块
+sysctl -w net.ipv4.icmp_echo_ignore_all=1
+#启用ping模块
+sysctl -w net.ipv4.icmp_echo_ignore_all=0
+#测试
+ping -c 2 cache
+注释：ansible cache -m ping 检查的是ssh的连通性，与ping无关
+关闭cache的ssh服务则无连通性
+]# systemctl stop sshd
+[root@ansible ~]# ansible cache -m ping -k
+SSH password: 
+cache | UNREACHABLE! => {
+    "changed": false, 
+    "msg": "Failed to connect to the host via ssh: ssh: connect to host cache port 22: Connection refused\r\n", 
+    "unreachable": true
+}
+启用cache的ssh服务则连通
+]# systemctl start sshd
+[root@ansible ~]# ansible cache -m ping -k	//-k，执行命令后输入密码
+SSH password: 
+cache | SUCCESS => {
+    "changed": false, 
+    "ping": "pong"
+}
+
+**通过主机分组添加账户密码，实现无密登陆
+]# vim /etc/ansible/hosts
+ 45 [web]
+ 46 web[1:2]
+ 47 
+ 48 [mysql]
+ 49 db1 ansible_ssh_user="root" ansible_ssh_pass="1"
+ 50 db2 ansible_ssh_user="root" ansible_ssh_pass="1"
+ 51 
+ 52 [other]
+ 53 cache
+]# ansible mysql -m ping	//无密登陆
+db2 | SUCCESS => {
+    "changed": false, 
+    "ping": "pong"
+}
+]# ansible web -m ping	//登陆失败，因没有规则
+web1 | UNREACHABLE! => {
+    "changed": false, 
+    "msg": "Failed to connect to the host via ssh: Warning:
+**实现分组添加
+]# vim /etc/ansible/hosts
+ 45 [web]
+ 46 web[1:2]
+ 47 
+ 48 [mysql]
+ 49 db1 ansible_ssh_user="root" ansible_ssh_pass="1"
+ 50 db2 ansible_ssh_user="root" ansible_ssh_pass="1"
+ 51 
+ 52 [other]
+ 53 cache
+ 54 
+ 55 [app:children]
+ 56 web
+ 57 mysql
+]# ansible app --list-host
+  hosts (4):
+    web1
+    web2
+    db1
+    db2
+**实现分组添加账户，密码，实现无密登陆
+]# vim /etc/ansible/hosts
+ 45 [web]
+ 46 web[1:2]
+ 47 
+ 48 [mysql]
+ 49 db1
+ 50 db2
+ 51 #db1 ansible_ssh_user="root" ansible_ssh_pass="1"
+ 52 #db2 ansible_ssh_user="root" ansible_ssh_pass="1"
+ 53 
+ 54 [other]
+ 55 cache
+ 56 
+ 57 [app:children]
+ 58 web
+ 59 mysql
+ 60 
+ 61 [app:vars]
+ 62 ansible_ssh_user="root"
+ 63 ansible_ssh_pass="1"
+]# ansible app -m ping
+db2 | SUCCESS => {
+    "changed": false, 
+    "ping": "pong"
+}
+... ...
+
+
+**自定义分组，实现分布需求
+mkdir ansible_kaifa
+cd ansible_kaifa/
+vim myhosts.sh
+
+#!/bin/bash
+echo '
+{"aa":{
+    "hosts":
+        ["web1","web2"],
+    "vars":{
+        "ansible_ssh_user":"root",
+        "ansible_ssh_pass":"1"
+        }
+     },
+ "bb":["db1","db2","cache"]
+}
+
+vim ansible.cfg 
+[defaults]
+
+inventory= myhosts.sh
+host_key_checking=False
+
+chmod 777 myhosts.sh 
+./myhosts.sh 
+ansible aa --list-hosts
+ansible bb --list-hosts
+ansible aa -m ping
+
+web1 | SUCCESS => {
+    "changed": false, 
+    "ping": "pong"
+}
+web2 | SUCCESS => {
+    "changed": false, 
+    "ping": "pong"
+}
+
+**给所有主机部署公钥
+cd /root/.ssh/
+ssh-keygen -t rsa -b 2048 -N ''
+cat id_rsa.pub 
+ansible all -m authorized_key -a "user=root exclusive=true manage_dir=true key='$(</root/.ssh/id_rsa.pub)'" -k
+
+SSH password: 
+cache | SUCCESS => {
+    "changed": true, 
+    "comment": null, 
+    "exclusive": true, 
+    "key": "ssh-rsa AAA
+... ...
+
+ssh web1	//实现无密钥登陆
+
+Last login: Thu Dec 27 19:30:27 2018 from 192.168.3.114
+
+#查看ansible模块数量
+]# ansible-doc -l | wc -l
+1378
+#查看ansible模块及用途
+]# ansible-doc -l
+#查看ansible的模块帮助
+]# ansible-doc ping
+
+#常见模块的区别
+command	默认
+eg:
+[root@ansible ~]# ansible cache -m command -a 'chdir=/tmp pwd'
+cache | SUCCESS | rc=0 >>
+/tmp
+raw		适用性广，不支持chdir
+eg:
+[root@ansible ~]# ansible cache -m raw -a 'chdir=/tmp pwd'
+cache | SUCCESS | rc=0 >>
+/root
+Shared connection to cache closed.
+shell		万能
+eg:
+[root@ansible ~]# ansible cache -m shell -a 'chdir=/tmp pwd'
+cache | SUCCESS | rc=0 >>
+/tmp
+
+*给web1虚拟机添加账户和密码
+[root@ansible ~]# ansible web1 -m shell -a "useradd z3"
+web1 | SUCCESS | rc=0 >>
+[root@ansible ~]# ansible web1 -m shell -a "echo 'aa' | passwd --stdin z3"
+web1 | SUCCESS | rc=0 >>
+更改用户 z3 的密码 。
+passwd：所有的身份验证令牌已经成功更新。
+*如果 web1虚拟机存在z3，则常见li4用户，并设置密码
+vim li4.sh
+chmod 755 li4.sh
+./li4.sh 
+ansible web1 -m script -a 'li4.sh'
+
+web1 | SUCCESS => {
+    "changed": true, 
+    "rc": 0, 
+    "stderr": "Shared connection to web1 closed.\r\n", 
+    "stdout": "", 
+    "stdout_lines": []
+}
+
+ansible web2 -m script -a 'li4.sh'
+
+web2 | SUCCESS => {
+    "changed": true, 
+    "rc": 0, 
+    "stderr": "Shared connection to web2 closed.\r\n", 
+    "stdout": "更改用户 li4 的密码 。\r\npasswd：所有的身份验证令牌已经成功更新。\r\n", 
+    "stdout_lines": [
+        "更改用户 li4 的密码 。", 
+        "passwd：所有的身份验证令牌已经成功更新。"
+    ]
+}
+
+ansible web1 -m shell -a 'id z3'
+
+web1 | SUCCESS | rc=0 >>
+uid=1000(z3) gid=1000(z3) 组=1000(z3)
+
+ansible web1 -m shell -a 'id li4'
+
+web1 | FAILED | rc=1 >>
+id: li4: no such usernon-zero return code
+
+ansible web2 -m shell -a 'id li4'
+
+web2 | SUCCESS | rc=0 >>
+uid=1000(li4) gid=1000(li4) 组=1000(li4)
+
+ansible web2 -m shell -a 'id z3'
+
+web2 | FAILED | rc=1 >>
+id: z3: no such usernon-zero return code
+
+#lineinfile模块
+ansible all -m lineinfile -a 'path=/etc/resolv.conf regexp=".*(\.114){3}" line="nameserver 192.168.3.254"'
+#replace模块
+ansible all -m replace -a "path=/etc/resolv.conf regexp='^(nameserver).*' replace='\1 8.8.8.8'"
+#copy模块
+ansible all -m copy -a 'src=/etc/resolv.conf dest=/etc/resolv.conf'
+#yum模块
+ansible cache -m yum -a 'name=chrony state=installed'
+#service模块
+ansible cache -m service -a 'name=chronyd state=started'
+ansible cache -m shell -a 'systemctl status chronyd'
+#setup模块
+ansible cache -m setup -a "filter=ansible_system_vendor"
+
+***综合练习
+**安装Apache并修改监听端口为8080
+**修改ServerName配置，执行apachectl -t命令不报错
+**设置默认主页hello world
+**启动服务并设置开机自启
+
+**安装Apache并修改监听端口为8080
+*安装yum源
+ansible web --list-hosts
+ansible web -m shell -a 'ls /etc/yum.repos.d/'
+ansible web -m shell -a 'rm -rf /etc/yum.repos.d/*'
+ansible web -m shell -a 'ls /etc/yum.repos.d/'
+vim centos_7.repo
+[#
+[Centos_repo]
+name=CentOS packet
+baseurl=ftp://192.168.3.254/centos7
+enabled=1
+gpgcheck=0
+#]
+ansible web -m copy -a 'src=centos_7.repo dest=/etc/yum.repos.d/'
+ansible web -m shell -a 'ls /etc/yum.repos.d/'
+ansible web -m shell -a 'yum clean all'
+ansible web -m shell -a 'yum repolist'
+*安装yum模块
+ansible web -m yum -a “name=’lrzsz‘ state=removed“
+ansible web -m yum -a 'name=lftp,lrzsz state=installed'
+ansible web -m service -a 'rpm -qa \ grep lftp lrzsz'
+*安装service模块
+ansible web -m service -a 'name=sshd enabled=yes state=started'
+*安装setup模块
+ansible web -m setup -a 'filter=os'
+ansible web -m setup -a 'filter=ansible_distribution'
+**启动服务并设置开机自启
+*安装apache
+ansible web -m yum -a 'name=httpd state=installed'
+ansible web -m service -a 'name=httpd enabled=yes state=started'
+*修改端口号为8080
+ansible web -m raw -a 'cat /etc/httpd/conf/httpd.conf | grep Listen'
+ansible web -m lineinfile -a 'path=/etc/httpd/conf/httpd.conf regexp="^Listen" line="Listen 8080"'
+ansible web -m raw -a 'cat /etc/httpd/conf/httpd.conf | grep Listen'
+**修改ServerName配置，执行apachectl -t命令不报错
+*执行apachectl -t不报错
+ansible web -m shell -a 'apachectl -t'
+ansible web -m lineinfile -a 'path=/etc/httpd/conf/httpd.conf regexp="^ServerName" line="ServerName 0.0.0.0"'
+ansible web -m shell -a 'apachectl -t'
+**设置默认主页hello world
+*设置默认主页
+echo 'hello,world!' > index.html
+[#
+hello,world!
+#]
+ansible web -m copy -a 'src=index.html dest=/var/www/html/'
+ansible web -m shell -a 'cat /var/www/html/index.html'
+*测试默认主页
+ansible web -m shell -a 'curl localhost'
+
+***Playbook的使用
+*批量ping机
+]# vim ping.yml
+---
+- hosts: all
+  remote_user: root
+  tasks:
+    - ping:
+]# ansible-playbook ping.yml
+
+**批量添加用户 ，密码，初次登陆修改密码
+*查看ansible的user模块
+]# ansible-doc -l | grep user
+user                                      Manage user accounts
+]# ansible-doc user
+]# vim yonghu.yml
+---
+- hosts: all
+  remote_user: root
+  tasks:
+    - name: add user
+      user:
+        name: plj
+        group: users
+    - name: change password
+      shell: echo 123456 | passwd --stdin plj
+    - shell: chage -d 0 plj
+]# ansible-playbook yonghu.yml
+*远程连接增加的用户
+]# ssh -l plj cache
+
+**用playbook安装apache,修改端口，配置servername,修改主页，设置开机自启
+---
+- hosts: web
+  remote_user: root
+  tasks:
+    - name: install one specific version of Apache
+      yum:
+        name: httpd        //安装Apache
+        state: installed
+    - lineinfile:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^Listen '
+        line: 'Listen 8080'        //修改端口为8080
+    - replace:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^#(ServerName).*'        //配置ServerName
+        replace: '\1 localhost'
+    - service:
+        name: httpd
+        enabled: yes        //开机自启
+        state: restarted
+    - copy:
+        src: /root/index.html        //修改主页，可以自己写个页面
+        dest: /var/www/html/index.html
+
+*创建用户yml
+]#vim cuser.yml 
+---
+- hosts: cache
+  remote_user: root
+  vars:
+    username: nb
+  tasks:
+    - name: add user
+      user:
+        name: "{{username}}"
+        group: users
+    - name: change password
+      shell: echo 123456 | passwd --stdin "{{username}}"
+    - shell: chage -d 0 "{{username}}"
+#运行添加用户
+]#ansible-playbook cuser.yml 
+#测试虚拟机cache的nb的id
+]#ssh cache id nb
+#快速创建用户
+]#ansible-playbook cuser.yml -e username="jj"
+]#ssh cache id jj
+
+*创建用户及组yml
+]#vim cguser.yml 
+---
+- hosts: db1
+  remote_user: root
+  vars:
+    user:
+      name: "qx"
+      group: "mail"
+  tasks:
+    - name: add user
+      user:
+        name: "{{user.name}}"
+        group: "{{user.group}}"
+    - name: change password
+      shell: echo 123456 | passwd --stdin "{{user.name}}"
+    - shell: chage -d 0 "{{user.name}}"
+]#ansible-playbook cguser.yml 
+]#ssh db1 id qx
+]#ansible-playbook cguser.yml -e '{"user":{"name":"xx","group":"mail"}}'
+
+*批量添加用户
+]#vim user.vars
+user:
+  name: "oo"
+  group: "users"
+user:
+  name: "zz"
+  group: "users"
+]#ansible-playbook cguser.yml -e '@user.vars'
+]#ssh db1 id oo
+]#ssh db1 id zz
+
+*密码加密创建用户，密码
+]#vim cgzuser.yml 
+---
+- hosts: db1
+  remote_user: root
+  vars:
+    user:
+      name: "yw"
+      group: "mail"
+  tasks:
+    - name: add user
+      user:
+        name: "{{user.name}}"
+        group: "{{user.group}}"
+        password: "{{'123456'|password_hash('sha512')}}"
+    - shell: chage -d 0 "{{user.name}}"
+]#ansible-playbook cgzuser.yml 
+]#ssh db1 id yw
+]#ssh -l yw ddb1
+
+*添加用户时，忽视已创建的用户，继续执行后续命令
+]#vim cgzuser_ignore.yml 
+---
+- hosts: db1
+  remote_user: root
+  vars:
+    user:
+      name: "yw"
+      group: "mail"
+  tasks:
+    - name: add user
+      user:
+        name: "{{user.name}}"
+        group: "{{user.group}}"
+        password: "{{'123456'|password_hash('sha512')}}"
+      ignore_errors: True
+    - shell: chage -d 0 "{{user.name}}"
+]#ansible-playbook cgzuser_ignore.yml 
+]#ssh db1 id yw
+]#ssh -l yw db1
+
+*添加用户时，忽视已创建的用户，继续执行后续命令
+]#vim cuser_ignore.yml 
+---
+- hosts: db2
+  remote_user: root
+  vars:
+    username: nb
+    group: "users"
+  tasks:
+    - shell: adduser "{{username}}"
+      ignore_errors: True
+    - shell: echo 123456 | passwd --stdin "{{username}}"
+]#ansible-playbook cuser_ignore.yml 
+]#ssh db2 id nb
+]#ssh -l nb db2
+]#vim user.vars 
+user:
+  name: "oo"
+  group: "users"
+user:
+  name: "oo"
+  group: "users"
+user:
+  name: "qq"
+  group: "users"
+]#ansible-playbook cuser_ignore.yml -e '@user.vars'
+
+*handlers(定义的串)配置文件
+]# vim adhttp.yml
+---
+- hosts: cache
+  remote_user: root
+  tasks:
+    - copy:
+        src: /root/httpd.conf
+        dest:  /etc/httpd/conf/httpd.conf
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - restart httpd
+  handlers:
+     - name: restart httpd
+       service: name=httpd state=restarted
+
+*用条件判断实现监听端口为8080的apache服务全部停止(5分钟负载超过0.7)
+]#vim load.yml
+---
+- hosts: web
+  remote_user: root
+  tasks:
+    - shell: uptime | awk '{printf("%.2f",$(NF-2))}'
+      register: result
+    - service:
+        name: httpd
+        state: stopped
+      when: result.stdout|float > 0.7
+]#ansible-playbook load.yml 
+]#ansible web -m shell -a 'curl localhost:8080'
+*用死循环启动cpu负载
+web1|2]#awk 'BEGIN{while(1){}}' &
+web1|2]#uptime 
+#杀死死循环
+web1|2]#kill -9 pid号
+
+*with_items标准循环
+]#vim cguser_with_items.yml
+---
+- hosts: mysql
+  remote_user: root
+  tasks:
+    - user:
+        name: "{{item.name}}"
+        group: "{{item.group}}"
+        password: "{{'123456'|password_hash('sha512')}}"
+      with_items:
+        - {name: "aa", group: "users"}
+        - {name: "bb", group: "mail" }
+        - {name: "cc", group: "wheel"}
+        - {name: "dd", group: "root" }
+]#ansible-playbook cguser_with_items.yml 
+]#ansible mysql -m shell -a "id aa"
+
+*debug信息
+]#vim load.yml 
+---
+- hosts: web
+  remote_user: root
+  tasks:
+    - shell: uptime | awk '{printf("%.2f",$(NF-2))}'
+      register: result
+    - service:
+        name: httpd
+        state: stopped
+      when: result.stdout|float > 0.7
+    - name: debug info
+      debug: var=result
+]#ansible-playbook load.yml
+TASK [debug info] **************************************************************
+ok: [web1] => {
+    "result": {
+        "changed": true, 
+... ...
+
+*with_nested循环嵌套输出
+]#vim qtzjuser.yml
+---
+- hosts: web
+  remote_user: root
+  vars:
+    un: [a, b, c]
+    id: [1, 2, 3]
+  tasks:
+    - name: add users
+      shell: echo {{item}}
+      with_nested:
+        - "{{un}}"
+        - "{{id}}"
+]#ansible-playbook qtzjuser.yml
+
+*tags调用识别
+]#vim taghttp.yml
+---
+- hosts: web
+  remote_user: root
+  tasks:
+    - copy:
+        src: /root/index.html
+        dest:  /var/www/html/index.html
+      tags: modify_index
+      notify:
+        - restart httpd
+  handlers:
+     - name: restart httpd
+       service: name=httpd state=restarted enabled=yes
+]#echo 'pig' > index.html 
+]#ansible-playbook taghttp.yml --tags=modify_index
+]#ansible web -m shell -a 'curl localhost:8080'
+
